@@ -114,15 +114,29 @@ zero events. Fix: the run lister returns `(run_id, status, graph_name)` and
 replay = silent skip; terminal + partial replay = synthesized terminal.
 
 **Replay–live join:** `_drain_run` reads `broker.events(follow=not finished)`.
-`RedisRunBroker.events` reads the replay list 16 elements per LRANGE; its place
-is the last raw element read, found again with LPOS when LTRIM at the cap shifts
-the list (event ids step by two and writers interleave, so ids are never
-positions). A follower reads the backlog, subscribes, then re-reads the list on
-every pub/sub message and every 5 s: pub/sub only wakes it. Nothing written
-between the stored and the live part is lost, `end` included (subscribing after
-one whole-buffer read used to drop such events), and an open stream holds about
-a page, not the run. Brokers that do not override `events` keep the
-replay-then-`aiter` join.
+A Redis Lua append stamps each list entry with its generation and ordinal. It takes
+both from the previous tail, so expiration or an intervening unpositioned writer
+starts a new generation. The same position travels on pub/sub. A follower can
+deliver the next ordinal immediately, including at the 10,000-entry cap. A gap,
+reconnect, five seconds of silence, or local completion triggers a paged list read.
+A reader can recover every still-retained entry. Each `put` has a delivery ID
+shared by its retries. Thread frames use this ID, or the stored envelope fingerprint
+for older rows, together with the run and projection index. Run SSE continues to
+expose the caller's public event ID.
+
+A reader holds 16 payloads per page, the last 128 delivery IDs, and one ordinal
+per retained generation. Legacy rows have no position. The change in the existing
+sequence counter bounds how far the list head could have moved. A page may overlap
+previous reads, so the reader retains up to one SHA-256 fingerprint per retained
+legacy row. All history expires with the reader.
+
+The writer emits `run_replay_buffer` with `milestone=started` after its first
+successful cache append and `milestone=reached_cap` when the returned list length
+first reaches the cap on that broker object. Group by distinct `run_id` across
+workers. For a start-time cohort, count starts in the window and allow its runs
+to finish before counting their cap milestones. A process crash before logging a
+successful append or missing logs can leave a run unobserved.
+
 
 ---
 

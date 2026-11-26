@@ -10,12 +10,11 @@ Implements the six endpoints consumed by the LangGraph SDK ``CronsClient``:
 * ``POST  /runs/crons/count``             → count (returns int)
 """
 
-from uuid import uuid4
-
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid_utils.compat import uuid7
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
@@ -266,7 +265,7 @@ async def _trigger_first_run(
     thread_id: str | None = None,
 ) -> Run:
     """Create the initial run for a newly created cron job."""
-    effective_thread_id = thread_id or cron.thread_id or str(uuid4())
+    effective_thread_id = thread_id or cron.thread_id or str(uuid7())
     should_delete_thread = thread_id is None and should_delete_stateless_thread(cron)
 
     run_request = _build_run_create(cron)

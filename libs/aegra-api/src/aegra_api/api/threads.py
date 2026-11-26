@@ -6,13 +6,13 @@ import json
 import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid_utils.compat import uuid7
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
@@ -234,7 +234,7 @@ async def create_thread(
         if isinstance(handler_meta, dict):
             request.metadata = {**(request.metadata or {}), **handler_meta}
 
-    thread_id = request.thread_id or str(uuid4())
+    thread_id = request.thread_id or str(uuid7())
     # Resolve before the insert so an invalid ttl request 422s without DB work.
     ttl_row = _resolve_ttl_row(thread_id, request.ttl)
 

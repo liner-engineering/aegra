@@ -16,8 +16,9 @@ applied to other APIs (runs, threads, crons) as part of ongoing refactoring.
 
 import uuid
 from datetime import UTC, datetime
+from secrets import token_hex
 from typing import Any
-from uuid import uuid4
+from uuid import uuid5
 
 from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
@@ -26,6 +27,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
 from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -195,8 +197,7 @@ class AssistantService(Authenticated):
         elif context:
             config["configurable"] = context
 
-        # Generate assistant_id if not provided
-        assistant_id = request.assistant_id or str(uuid4())
+        assistant_id = request.assistant_id or str(uuid5(ASSISTANT_NAMESPACE_UUID, f"created:{token_hex(16)}"))
 
         # Generate name if not provided
         name = request.name or f"Assistant for {graph_id}"

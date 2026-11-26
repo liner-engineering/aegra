@@ -317,7 +317,7 @@ class TestFireCron:
         mock_session = AsyncMock()
 
         with (
-            patch("aegra_api.services.cron_scheduler.uuid4", return_value="eph-thread-1"),
+            patch("aegra_api.services.cron_scheduler.uuid7", return_value="eph-thread-1"),
             patch(
                 "aegra_api.services.cron_scheduler._prepare_run",
                 new_callable=AsyncMock,
@@ -356,7 +356,7 @@ class TestFireCron:
         mock_session = AsyncMock()
 
         with (
-            patch("aegra_api.services.cron_scheduler.uuid4", return_value="eph-thread-keep"),
+            patch("aegra_api.services.cron_scheduler.uuid7", return_value="eph-thread-keep"),
             patch(
                 "aegra_api.services.cron_scheduler._prepare_run",
                 new_callable=AsyncMock,
@@ -376,7 +376,7 @@ class TestFireCron:
         mock_session = AsyncMock()
 
         with (
-            patch("aegra_api.services.cron_scheduler.uuid4", return_value="eph-thread-fail"),
+            patch("aegra_api.services.cron_scheduler.uuid7", return_value="eph-thread-fail"),
             patch(
                 "aegra_api.services.cron_scheduler._prepare_run",
                 new_callable=AsyncMock,

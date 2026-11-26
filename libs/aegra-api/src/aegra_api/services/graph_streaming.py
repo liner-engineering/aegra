@@ -4,7 +4,6 @@ This module provides streaming functionality for LangGraph graph executions,
 handling message accumulation, event processing, and multiple stream modes.
 """
 
-import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from typing import Any, cast
@@ -30,6 +29,7 @@ from langgraph.errors import (
 from langgraph.pregel.debug import CheckpointPayload, TaskResultPayload
 from pydantic import ValidationError
 from pydantic.v1 import ValidationError as ValidationErrorLegacy
+from uuid_utils.compat import uuid7
 
 from aegra_api.models.runs import Durability
 from aegra_api.utils.run_utils import _filter_context_by_schema
@@ -148,7 +148,7 @@ async def stream_graph_events(
     Yields:
         Tuples of (mode, payload) where mode is the stream mode and payload is the event data
     """
-    run_id = str(config.get("configurable", {}).get("run_id", uuid.uuid4()))
+    run_id = str(config.get("configurable", {}).get("run_id") or uuid7())
     config, interrupt_kwargs = _extract_interrupt_kwargs(config)
     # Omitted when unset so the call is unchanged for runs that never asked for a mode.
     durability_kwargs: dict[str, Durability] = {"durability": durability} if durability is not None else {}

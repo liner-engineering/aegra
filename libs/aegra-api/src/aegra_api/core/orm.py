@@ -94,8 +94,7 @@ Base = declarative_base()
 class Assistant(Base):
     __tablename__ = "assistant"
 
-    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
-    assistant_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
+    assistant_id: Mapped[str] = mapped_column(Text, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     graph_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -155,8 +154,7 @@ class Thread(Base):
 class Run(Base):
     __tablename__ = "runs"
 
-    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
-    run_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("uuidv7()::text"))
     thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False)
     assistant_id: Mapped[str | None] = mapped_column(Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
@@ -195,8 +193,7 @@ class Run(Base):
 class Cron(Base):
     __tablename__ = "crons"
 
-    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
-    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
+    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("uuidv7()::text"))
     assistant_id: Mapped[str] = mapped_column(
         Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
     )

@@ -68,7 +68,9 @@ If a newer release causes errors:
 
 ### PostgreSQL
 
-Aegra uses PostgreSQL with the pgvector extension for persistence and vector search. The recommended image is `pgvector/pgvector:pg18`.
+This fork uses PostgreSQL 18 for UUID v7 database defaults and pgvector for vector search. Use `pgvector/pgvector:pg18`.
+
+Aegra issues UUID v7 for thread, run, cron, and request identifiers. The assistant service issues UUID v5 and supplies the assistant ID on insert. Default assistants keep the ID derived from their graph name. Stored IDs and caller-provided IDs retain their format.
 
 When you use `aegra dev` or `aegra up`, PostgreSQL starts through Compose. With `AEGRA_CONTAINER_RUNTIME` unset, that is a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
 

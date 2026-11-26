@@ -7,7 +7,6 @@ to the existing run preparation pipeline.
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
-from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
@@ -15,6 +14,7 @@ from croniter import croniter
 from fastapi import Depends, HTTPException
 from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid_utils.compat import uuid7
 
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Cron as CronORM
@@ -281,7 +281,7 @@ class CronService:
         )
 
         cron_orm = CronORM(
-            cron_id=str(uuid4()),
+            cron_id=str(uuid7()),
             assistant_id=resolved_assistant_id,
             thread_id=thread_id,
             user_id=user_identity,

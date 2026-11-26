@@ -83,7 +83,7 @@ class TestRunsEndpoints:
             ),
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.services.run_preparation.uuid7", return_value=run_id),
             patch(
                 "aegra_api.services.run_preparation.executor.submit",
                 new_callable=AsyncMock,

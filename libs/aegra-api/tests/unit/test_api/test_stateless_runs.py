@@ -584,7 +584,7 @@ class TestStatelessWaitForRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-1"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-1"),
             patch(
                 "aegra_api.api.stateless_runs.wait_for_run",
                 new_callable=AsyncMock,
@@ -620,7 +620,7 @@ class TestStatelessWaitForRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-2"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-2"),
             patch(
                 "aegra_api.api.stateless_runs.wait_for_run",
                 new_callable=AsyncMock,
@@ -643,7 +643,7 @@ class TestStatelessWaitForRun:
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-3"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-3"),
             patch(
                 "aegra_api.api.stateless_runs.wait_for_run",
                 new_callable=AsyncMock,
@@ -665,7 +665,7 @@ class TestStatelessWaitForRun:
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-err"),
             patch(
                 "aegra_api.api.stateless_runs.wait_for_run",
                 new_callable=AsyncMock,
@@ -704,7 +704,7 @@ class TestStatelessStreamRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-4"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-4"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -742,7 +742,7 @@ class TestStatelessStreamRun:
         mock_response = EventSourceResponse(_fake_body())
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-5"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-5"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -765,7 +765,7 @@ class TestStatelessStreamRun:
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-err"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -803,7 +803,7 @@ class TestStatelessStreamRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-disc"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-disc"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -852,7 +852,7 @@ class TestStatelessStreamRun:
         finished_broker.is_finished.return_value = True
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-slow"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-slow"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -913,7 +913,7 @@ class TestStatelessStreamRun:
         active_broker.is_finished.return_value = False  # run still in flight
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-active"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-active"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -965,7 +965,7 @@ class TestStatelessStreamRun:
         mock_response = EventSourceResponse(_fake_body(), headers={})
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-noid"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-noid"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -1008,7 +1008,7 @@ class TestStatelessStreamRun:
         mock_response = EventSourceResponse(_fake_body())
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-cleanup"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-cleanup"),
             patch(
                 "aegra_api.api.stateless_runs.create_and_stream_run",
                 new_callable=AsyncMock,
@@ -1062,7 +1062,7 @@ class TestStatelessCreateRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-6"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-6"),
             patch(
                 "aegra_api.api.stateless_runs.create_run",
                 new_callable=AsyncMock,
@@ -1094,7 +1094,7 @@ class TestStatelessCreateRun:
         )
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-7"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-7"),
             patch(
                 "aegra_api.api.stateless_runs.create_run",
                 new_callable=AsyncMock,
@@ -1113,7 +1113,7 @@ class TestStatelessCreateRun:
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
         with (
-            patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
+            patch("aegra_api.api.stateless_runs.uuid7", return_value="eph-thread-err"),
             patch(
                 "aegra_api.api.stateless_runs.create_run",
                 new_callable=AsyncMock,

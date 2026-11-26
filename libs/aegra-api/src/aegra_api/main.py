@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
+from uuid import UUID
 
 import structlog
 from asgi_correlation_id import CorrelationIdMiddleware
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from starlette.requests import HTTPConnection
+from uuid_utils.compat import uuid7
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
@@ -335,6 +337,13 @@ def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
         )
 
 
+def _valid_request_id(value: str) -> bool:
+    try:
+        return UUID(value).version in (4, 7)
+    except ValueError:
+        return False
+
+
 def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
     """Add common middleware stack in correct order.
 
@@ -349,7 +358,11 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
         cors_config: CORS configuration dict or None for defaults
     """
     app.add_middleware(StructLogMiddleware)
-    app.add_middleware(CorrelationIdMiddleware)
+    app.add_middleware(
+        CorrelationIdMiddleware,
+        generator=lambda: uuid7().hex,
+        validator=_valid_request_id,
+    )
     _add_cors_middleware(app, cors_config)
     app.add_middleware(ContentTypeFixMiddleware)
 

@@ -1,3 +1,4 @@
+from contextlib import AsyncExitStack
 from uuid import UUID
 
 import pytest
@@ -12,31 +13,30 @@ from tests.e2e._utils import get_e2e_client
 async def test_identifiers_for_new_assistants_threads_runs_and_crons() -> None:
     client = get_e2e_client()
     graph_id = "cron_example"
-    assistant = await client.assistants.create(graph_id=graph_id, config={"tags": ["id-versions"]})
-    assistant_id = assistant["assistant_id"]
-    thread = await client.threads.create()
-    thread_id = thread["thread_id"]
 
-    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30) as http:
+    async with AsyncExitStack() as cleanup, AsyncClient(base_url=settings.app.SERVER_URL, timeout=30) as http:
+        assistant = await client.assistants.create(graph_id=graph_id, config={"tags": ["id-versions"]})
+        assistant_id = assistant["assistant_id"]
+        cleanup.push_async_callback(client.assistants.delete, assistant_id)
+        thread = await client.threads.create()
+        thread_id = thread["thread_id"]
+        cleanup.push_async_callback(client.threads.delete, thread_id)
+
         cron = await http.post(
             "/runs/crons", json={"assistant_id": assistant_id, "schedule": "0 0 * * *", "enabled": False}
         )
         cron.raise_for_status()
         cron_id = cron.json()["cron_id"]
+        cleanup.push_async_callback(client.crons.delete, cron_id)
 
-        try:
-            assert UUID(assistant_id).version == 5
-            assert UUID(thread_id).version == 7
-            assert UUID(cron_id).version == 7
+        assert UUID(assistant_id).version == 5
+        assert UUID(thread_id).version == 7
+        assert UUID(cron_id).version == 7
 
-            run = await client.runs.create(thread_id, assistant_id, input={"messages": []})
-            assert UUID(run["run_id"]).version == 7
-            state = await client.runs.join(thread_id, run["run_id"])
-            assert state["messages"][-1]["content"].startswith("Tick #1")
-        finally:
-            await client.crons.delete(cron_id)
-            await client.threads.delete(thread_id)
-            await client.assistants.delete(assistant_id)
+        run = await client.runs.create(thread_id, assistant_id, input={"messages": []})
+        assert UUID(run["run_id"]).version == 7
+        state = await client.runs.join(thread_id, run["run_id"])
+        assert state["messages"][-1]["content"].startswith("Tick #1")
 
 
 @pytest.mark.e2e

@@ -8,7 +8,6 @@ import asyncio
 from datetime import UTC, datetime
 from functools import cache
 from typing import Any
-from uuid import uuid4
 
 import structlog
 from asgi_correlation_id import correlation_id
@@ -16,6 +15,7 @@ from fastapi import HTTPException
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid_utils.compat import uuid7
 
 from aegra_api.config import load_checkpointer_config
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
@@ -295,7 +295,7 @@ async def _prepare_run(
         await ensure_webhook_allowed(request.webhook)
     await _validate_resume_command(session, thread_id, request.command)
 
-    run_id = str(uuid4())
+    run_id = str(uuid7())
     langgraph_service = get_langgraph_service()
     logger.info(
         "Scheduling run",

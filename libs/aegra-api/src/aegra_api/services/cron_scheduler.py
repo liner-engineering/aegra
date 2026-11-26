@@ -15,12 +15,12 @@ Follows the same ``start()/stop()`` lifecycle pattern used by
 import asyncio
 import contextlib
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import structlog
 from fastapi import HTTPException
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid_utils.compat import uuid7
 
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
@@ -188,7 +188,7 @@ class CronScheduler:
             return
 
         run_request = _build_run_create(cron)
-        thread_id = cron.thread_id or str(uuid4())
+        thread_id = cron.thread_id or str(uuid7())
         user = User(
             identity=cron.user_id,
             display_name="cron-scheduler",

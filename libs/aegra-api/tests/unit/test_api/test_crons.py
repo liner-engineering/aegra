@@ -60,7 +60,7 @@ class TestTriggerFirstRun:
         cron = _make_cron(thread_id=None, on_run_completed=None)
 
         with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-1"),
+            patch("aegra_api.api.crons.uuid7", return_value="eph-thread-1"),
             patch(
                 "aegra_api.api.crons._prepare_run",
                 new_callable=AsyncMock,
@@ -100,7 +100,7 @@ class TestTriggerFirstRun:
         cron = _make_cron(thread_id=None, on_run_completed="keep")
 
         with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-keep"),
+            patch("aegra_api.api.crons.uuid7", return_value="eph-thread-keep"),
             patch(
                 "aegra_api.api.crons._prepare_run",
                 new_callable=AsyncMock,
@@ -119,7 +119,7 @@ class TestTriggerFirstRun:
         cron = _make_cron(thread_id=None, on_run_completed=None)
 
         with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-fail"),
+            patch("aegra_api.api.crons.uuid7", return_value="eph-thread-fail"),
             patch(
                 "aegra_api.api.crons._prepare_run",
                 new_callable=AsyncMock,

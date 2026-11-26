@@ -8,13 +8,13 @@ explicitly sets ``on_completion="keep"``).
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
+from uuid_utils.compat import uuid7
 
 from aegra_api.api.runs import (
     create_and_stream_run,
@@ -134,7 +134,7 @@ async def stateless_wait_for_run(
     endpoint, and deletes the thread after the response finishes streaming
     (unless ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = str(uuid7())
     should_delete = request.on_completion != "keep"
 
     try:
@@ -202,7 +202,7 @@ async def stateless_stream_run(
     ``create_and_stream_run`` endpoint, and deletes the thread after the
     stream finishes (unless ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = str(uuid7())
     should_delete = request.on_completion != "keep"
 
     try:
@@ -284,7 +284,7 @@ async def stateless_create_run(
     endpoint, and schedules cleanup as a background task (unless
     ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = str(uuid7())
     should_delete = request.on_completion != "keep"
 
     try:

@@ -18,12 +18,12 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
 import structlog
 from redis import RedisError
 from redis.asyncio.client import PubSub
 from redis.exceptions import ResponseError
+from uuid_utils.compat import uuid7
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.redis_manager import redis_manager
@@ -223,7 +223,7 @@ class RedisRunBroker(BaseRunBroker):
 
         envelope = {
             "event_id": event_id,
-            "delivery_id": uuid4().hex,
+            "delivery_id": uuid7().hex,
             "payload": json.loads(_serialize_payload(payload)),
         }
         message = json.dumps(envelope)
@@ -268,7 +268,7 @@ class RedisRunBroker(BaseRunBroker):
         append = redis_manager.get_client().register_script(_APPEND)
         length, position = await append(
             keys=[self._cache_key, self._counter_key],
-            args=[message, uuid4().hex, _REPLAY_MAX_EVENTS, _REPLAY_TTL_SECONDS],
+            args=[message, uuid7().hex, _REPLAY_MAX_EVENTS, _REPLAY_TTL_SECONDS],
         )
         return length, position
 

@@ -34,12 +34,15 @@ def test_new_id_starts_with_its_creation_time() -> None:
 
 
 def test_aegra_makes_no_random_uuid4_ids() -> None:
-    """A rebase onto a new upstream release must not bring a ``uuid4()`` call back."""
+    """A rebase onto a new upstream release must not bring a ``str(uuid4())`` id back.
+
+    Random tokens that are not row ids (``uuid4().hex`` delivery ids) stay random.
+    """
     offenders = [
         f"{path.relative_to(SOURCE)}:{number}"
         for path in SOURCE.rglob("*.py")
         for number, line in enumerate(path.read_text().splitlines(), start=1)
-        if "uuid4(" in line
+        if "str(uuid4())" in line or "str(uuid.uuid4())" in line or "uuid.uuid4())" in line
     ]
 
     assert offenders == []

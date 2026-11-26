@@ -23,7 +23,13 @@ async def test_identifiers_for_new_assistants_threads_runs_and_crons() -> None:
         cleanup.push_async_callback(client.threads.delete, thread_id)
 
         cron = await http.post(
-            "/runs/crons", json={"assistant_id": assistant_id, "schedule": "0 0 * * *", "enabled": False}
+            "/runs/crons",
+            json={
+                "assistant_id": assistant_id,
+                "schedule": "0 0 * * *",
+                "enabled": False,
+                "input": {"messages": []},
+            },
         )
         cron.raise_for_status()
         cron_id = cron.json()["cron_id"]

@@ -85,6 +85,10 @@ class BaseRunBroker(ABC):
             if _is_terminal_payload(payload):
                 return
 
+    def thread_events(self, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
+        """Yield stable identities for v2 thread frame de-duplication."""
+        return self.events(follow=follow)
+
     @abstractmethod
     def mark_finished(self) -> None:
         """Mark this broker as finished."""

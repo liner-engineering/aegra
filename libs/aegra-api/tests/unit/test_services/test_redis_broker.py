@@ -74,10 +74,10 @@ class TestRedisRunBroker:
         """Test that put() publishes to channel and stores in cache list via pipeline"""
         broker = self._make_broker()
         mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, "abc:1"])
         mock_client = MagicMock()
         mock_client.publish = AsyncMock()
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
             mock_rm.get_client.return_value = mock_client
@@ -93,17 +93,10 @@ class TestRedisRunBroker:
             assert data["event_id"] == "evt-1"
             assert data["payload"] == ["values", {"msg": "hello"}]
 
-            # Should use pipeline for cache operations
-            mock_client.pipeline.assert_called_once()
-            mock_pipe.rpush.assert_called_once()
-            cache_key, cached_msg = mock_pipe.rpush.call_args[0]
-            assert cache_key == "aegra:run:cache:run-123"
-            assert json.loads(cached_msg) == data
-
-            # Should trim, set TTL, and increment counter in pipeline
-            mock_pipe.ltrim.assert_called_once()
-            mock_pipe.expire.assert_called()
-            mock_pipe.incr.assert_called_once_with("aegra:run:counter:run-123")
+            assert data.pop("position") == "abc:1"
+            cache_args = mock_pipe.execute.call_args.kwargs
+            assert cache_args["keys"] == ["aegra:run:cache:run-123", "aegra:run:counter:run-123"]
+            assert json.loads(cache_args["args"][0]) == data
             mock_pipe.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -119,16 +112,16 @@ class TestRedisRunBroker:
             await broker.put("evt-1", ("values", {"msg": "hello"}), resumable=False)
 
             mock_client.publish.assert_called_once()
-            mock_client.pipeline.assert_not_called()
+            mock_client.register_script.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_put_end_event_marks_finished(self) -> None:
         broker = self._make_broker()
         mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, "abc:1"])
         mock_client = MagicMock()
         mock_client.publish = AsyncMock()
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
             mock_rm.get_client.return_value = mock_client
@@ -158,7 +151,7 @@ class TestRedisRunBroker:
         mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("Redis down"))
         mock_client = MagicMock()
         mock_client.publish = AsyncMock()
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with (
             patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
@@ -180,10 +173,10 @@ class TestRedisRunBroker:
         """
         broker = self._make_broker()
         mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
+        mock_pipe.execute = AsyncMock(side_effect=[RedisConnectionError("blip"), [1, "abc:1"]])
         mock_client = MagicMock()
         mock_client.publish = AsyncMock()
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with (
             patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
@@ -203,10 +196,10 @@ class TestRedisRunBroker:
         re-run, so the replay buffer is never double-written (no duplicate RPUSH)."""
         broker = self._make_broker()
         mock_pipe = MagicMock()
-        mock_pipe.execute = AsyncMock()
+        mock_pipe.execute = AsyncMock(return_value=[1, "abc:1"])
         mock_client = MagicMock()
         mock_client.publish = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with (
             patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
@@ -228,7 +221,7 @@ class TestRedisRunBroker:
         mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("down"))
         mock_client = MagicMock()
         mock_client.publish = AsyncMock(side_effect=RedisConnectionError("down"))
-        mock_client.pipeline.return_value = mock_pipe
+        mock_client.register_script.return_value = mock_pipe.execute
 
         with (
             patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
@@ -249,16 +242,18 @@ class TestRedisRunBroker:
         order: list[str] = []
         gate = asyncio.Event()
 
-        async def slow_first_cache(message: str) -> None:
+        async def slow_first_cache(message: str) -> tuple[int, str]:
             order.append("A-cache-start")
             await gate.wait()  # hold the write lock until released
             order.append("A-cache-end")
+            return 1, "abc:1"
 
         async def publish_noop(message: str) -> None:
             order.append("publish")
 
-        async def second_cache(message: str) -> None:
+        async def second_cache(message: str) -> tuple[int, str]:
             order.append("B-cache")
+            return 2, "abc:2"
 
         broker._cache_event = slow_first_cache  # type: ignore[method-assign]
         broker._publish_event = publish_noop  # type: ignore[method-assign]

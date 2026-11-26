@@ -1,6 +1,7 @@
 """Tests for ThreadEventSession: native-event forwarding, seq, filter, since, HITL, lifecycle."""
 
 import asyncio
+import json
 import random
 import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
@@ -789,17 +790,17 @@ def redis_writer(monkeypatch: pytest.MonkeyPatch) -> RedisBrokerManager:
     return RedisBrokerManager()
 
 
-def _wrap_lrange(monkeypatch: pytest.MonkeyPatch, wrapper: Callable[[int, int, list[str]], Awaitable[None]]) -> None:
-    """Call ``wrapper(start, end, page)`` after every LRANGE; it may raise or write."""
-    client = redis_manager.get_client()
-    lrange = client.lrange
+def _wrap_read(monkeypatch: pytest.MonkeyPatch, wrapper: Callable[[int, int, list[str]], Awaitable[None]]) -> None:
+    read = redis_broker.RedisRunBroker._read_page
 
-    async def wrapped(key: str, start: int, end: int) -> list[str]:
-        page = await lrange(key, start, end)
-        await wrapper(start, end, page)
-        return page
+    async def wrapped(
+        broker: redis_broker.RedisRunBroker, place: redis_broker._ReplayPlace
+    ) -> tuple[int, int, int, list[str]]:
+        first, length, counter, page = await read(broker, place)
+        await wrapper(first, first + redis_broker._REPLAY_PAGE_EVENTS - 1, page)
+        return first, length, counter, page
 
-    monkeypatch.setattr(client, "lrange", wrapped)
+    monkeypatch.setattr(redis_broker.RedisRunBroker, "_read_page", wrapped)
 
 
 def _kinds(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
@@ -807,6 +808,35 @@ def _kinds(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
 
 
 class TestRedisBackedSession:
+    @pytest.mark.parametrize("legacy", [False, True])
+    async def test_distinct_events_with_one_public_id_keep_their_frame_ids_on_resume(
+        self, redis_writer: RedisBrokerManager, legacy: bool
+    ) -> None:
+        writer = redis_writer.get_or_create_broker("run-1")
+        for item in [
+            ("tools", _protocol_event("tools", {"event": "start"})),
+            ("tools", _protocol_event("tools", {"event": "finish"})),
+            ("end", {"status": "success"}),
+        ]:
+            if legacy:
+                await redis_manager.get_client().rpush(
+                    writer._cache_key, json.dumps({"event_id": "shared", "payload": item})
+                )
+            else:
+                await writer.put("shared", item)
+
+        frames = await _collect(_make_session("t1", channels={"tools", "lifecycle"}, run_ids=("run-1",)))
+        assert _kinds(frames) == [
+            ("lifecycle", "running"),
+            ("tools", "start"),
+            ("tools", "finish"),
+            ("lifecycle", "completed"),
+        ]
+        assert len({frame["event_id"] for frame in frames}) == len(frames)
+        resumed = await _collect(_make_session("t1", channels={"tools"}, run_ids=("run-1",), since=frames[1]["seq"]))
+        assert _kinds(resumed) == [("tools", "finish")]
+        assert [(f["event_id"], f["seq"]) for f in resumed] == [(frames[2]["event_id"], frames[2]["seq"])]
+
     async def test_run_reopened_mid_run_gets_the_rest_and_its_terminal_lifecycle(
         self, redis_writer: RedisBrokerManager, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -820,7 +850,7 @@ class TestRedisBackedSession:
                 wrote = True
                 await redis_writer.get_or_create_broker("run-1").put("run-1_end", ("end", {"status": "success"}))
 
-        _wrap_lrange(monkeypatch, end_after_the_tail_read)
+        _wrap_read(monkeypatch, end_after_the_tail_read)
 
         events = await asyncio.wait_for(
             _collect(_make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",))), 2
@@ -848,7 +878,7 @@ class TestRedisBackedSession:
             if start > 0:
                 raise RedisError("connection reset")
 
-        _wrap_lrange(monkeypatch, fail_after_the_first_page)
+        _wrap_read(monkeypatch, fail_after_the_first_page)
 
         events = await _collect(
             _make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",), statuses={"run-1": "success"})
@@ -870,7 +900,7 @@ class TestRedisBackedSession:
         async def fail(start: int, end: int, page: list[str]) -> None:
             raise RedisError("connection reset")
 
-        _wrap_lrange(monkeypatch, fail)
+        _wrap_read(monkeypatch, fail)
 
         events = await _collect(
             _make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",), statuses={"run-1": "success"})
@@ -906,7 +936,11 @@ class TestRedisBackedSession:
             _make_session("t1", channels=channels, run_ids=("run-1",), statuses={"run-1": status})
         )
 
-        assert over_redis == reference
+        assert len({event["event_id"] for event in over_redis}) == len(over_redis)
+        for actual, expected in zip(over_redis, reference, strict=True):
+            assert {k: v for k, v in actual.items() if k != "event_id"} == {
+                k: v for k, v in expected.items() if k != "event_id"
+            }
 
     @pytest.mark.parametrize("status", ["success", "running"])
     async def test_draining_a_run_holds_a_page_not_the_run(self, redis_writer: RedisBrokerManager, status: str) -> None:

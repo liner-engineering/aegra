@@ -135,7 +135,7 @@ class ThreadEventSession:
         terminal closes any still-open subgraph namespaces before the root
         status (a cancel mid-subgraph otherwise leaves them started forever).
 
-        ``broker.events`` reads the stored events (a page at a time on Redis)
+        ``broker.thread_events`` reads the stored events (a page at a time on Redis)
         and, for a run still going, joins its live events without a gap, so
         the drain holds about a page of events rather than the run.
 
@@ -161,7 +161,7 @@ class ThreadEventSession:
             for envelope in self._emit(seed, seed_id):
                 yield envelope
         try:
-            async with aclosing(broker.events(follow=not finished)) as events:
+            async with aclosing(broker.thread_events(follow=not finished)) as events:
                 async for event_id, raw_event in events:
                     if not opened:
                         opened = True

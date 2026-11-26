@@ -2,7 +2,7 @@
 
 fakeredis, not MagicMock: the join is only correct under real list and pub/sub semantics
 (RPUSH before PUBLISH, LTRIM shifting positions, LPOS, a subscriber missing what was published
-before it subscribed). Orderings Redis does not expose are forced by wrapping ``client.lrange``.
+before it subscribed). Races between atomic page reads are forced at the broker read boundary.
 """
 
 import asyncio
@@ -63,6 +63,20 @@ async def _write(writer: RedisRunBroker, indexes: range, *, end: bool = False) -
         await writer.put(END_ID, ("end", {"status": "success"}))
 
 
+async def _legacy_write(client: fakeredis.FakeAsyncRedis, indexes: range, *, end: bool = False) -> None:
+    events = [(_event_id(i), _event(i)) for i in indexes]
+    if end:
+        events.append((END_ID, ("end", {"status": "success"})))
+    for event_id, payload in events:
+        raw = json.dumps({"event_id": event_id, "payload": payload})
+        pipe = client.pipeline()
+        pipe.rpush(CACHE_KEY, raw)
+        pipe.ltrim(CACHE_KEY, -redis_broker._REPLAY_MAX_EVENTS, -1)
+        pipe.incr(_broker()._counter_key)
+        await pipe.execute()
+        await client.publish(_broker()._channel, raw)
+
+
 async def _collect(events: AsyncGenerator[tuple[str, Any], None]) -> list[str]:
     async with aclosing(events) as stream:
         return [event_id async for event_id, _ in stream]
@@ -102,27 +116,26 @@ def _counting_lpos(client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyP
     return calls
 
 
-def _wrap_lrange(
+def _wrap_read(
     client: fakeredis.FakeAsyncRedis,
     monkeypatch: pytest.MonkeyPatch,
     before: Callable[[int, int, int], Awaitable[None]] | None = None,
     after: Callable[[list[str], int, int], Awaitable[None]] | None = None,
 ) -> None:
-    """Run ``before(call, start, end)`` / ``after(page, start, end)`` around every LRANGE."""
-    lrange = client.lrange
+    read = RedisRunBroker._read_page
     calls = 0
 
-    async def wrapped(key: str, start: int, end: int) -> list[str]:
+    async def wrapped(broker: RedisRunBroker, place: redis_broker._ReplayPlace) -> tuple[int, int, int, list[str]]:
         nonlocal calls
         calls += 1
         if before is not None:
-            await before(calls, start, end)
-        page = await lrange(key, start, end)
+            await before(calls, place.index, place.index + redis_broker._REPLAY_PAGE_EVENTS - 1)
+        first, length, counter, page = await read(broker, place)
         if after is not None:
-            await after(page, start, end)
-        return page
+            await after(page, first, first + redis_broker._REPLAY_PAGE_EVENTS - 1)
+        return first, length, counter, page
 
-    monkeypatch.setattr(client, "lrange", wrapped)
+    monkeypatch.setattr(RedisRunBroker, "_read_page", wrapped)
 
 
 async def _peak_bytes(work: Awaitable[None]) -> int:
@@ -139,7 +152,7 @@ class TestStoredEvents:
     async def test_stored_events_match_replay(self, client: fakeredis.FakeAsyncRedis, seed: int) -> None:
         """Random buffers of up to four pages, with adjacent retry copies: the same events as replay(None)."""
         rng = random.Random(seed)
-        await _write(_broker(), range(rng.randint(0, 4 * redis_broker._REPLAY_PAGE_EVENTS)), end=rng.random() < 0.7)
+        await _legacy_write(client, range(rng.randint(0, 4 * redis_broker._REPLAY_PAGE_EVENTS)), end=rng.random() < 0.7)
         for _ in range(rng.randint(0, 3)):  # what a timed-out-but-applied cache pipeline leaves behind
             length = await client.llen(CACHE_KEY)
             if length:
@@ -156,7 +169,7 @@ class TestStoredEvents:
         self, client: fakeredis.FakeAsyncRedis
     ) -> None:
         page = redis_broker._REPLAY_PAGE_EVENTS
-        await _write(_broker(), range(2 * page), end=True)
+        await _legacy_write(client, range(2 * page), end=True)
         last_of_first_page = await client.lindex(CACHE_KEY, page - 1)
         await client.linsert(CACHE_KEY, "AFTER", last_of_first_page, last_of_first_page)
 
@@ -166,34 +179,73 @@ class TestStoredEvents:
 
     async def test_stored_events_skip_a_retry_copy_that_is_not_adjacent(self, client: fakeredis.FakeAsyncRedis) -> None:
         """Two writers can interleave a retry copy with another event; replay(None) would send it twice."""
-        await _write(_broker(), range(5))
+        await _legacy_write(client, range(5))
         await client.rpush(CACHE_KEY, await client.lindex(CACHE_KEY, 2))
-        await _write(_broker(), range(5, 7), end=True)
+        await _legacy_write(client, range(5, 7), end=True)
 
         sent = [event_id async for event_id, _ in _broker().events(follow=False)]
 
         assert sent == _ids(7, end=True)
 
-    @pytest.mark.parametrize("trims", [1, 3])
+    async def test_equal_public_ids_do_not_hide_distinct_events_or_a_terminal(
+        self, client: fakeredis.FakeAsyncRedis
+    ) -> None:
+        writer = _broker()
+        await writer.put("shared", ("messages", 1))
+        envelope = json.loads(await client.lindex(CACHE_KEY, 0))
+        del envelope["position"]
+        await writer.put("shared", ("messages", 2))
+        await writer.put("shared", ("messages", 1))
+        await writer._cache_event(json.dumps(envelope))
+        await writer.put("shared", ("end", {}))
+
+        assert [event async for event in _broker().events(follow=False)] == [
+            ("shared", ("messages", 1)),
+            ("shared", ("messages", 2)),
+            ("shared", ("messages", 1)),
+            ("shared", ("end", {})),
+        ]
+
+    async def test_legacy_rows_with_equal_ids_keep_each_different_payload(
+        self, client: fakeredis.FakeAsyncRedis
+    ) -> None:
+        values = [("messages", 1), ("messages", 2), ("end", {})]
+        for payload in [values[0], values[1], values[0], values[2]]:
+            await client.rpush(CACHE_KEY, json.dumps({"event_id": "shared", "payload": payload}))
+
+        assert [payload async for _, payload in _broker().events(follow=False)] == values
+
+    async def test_writer_records_cap_milestones_using_the_physical_length(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 3)
+        info = MagicMock()
+        monkeypatch.setattr(redis_broker.logger, "info", info)
+        await _write(_broker(), range(5))
+        assert [c.kwargs for c in info.call_args_list] == [
+            {"run_id": RUN_ID, "milestone": "started", "cap": 3},
+            {"run_id": RUN_ID, "milestone": "reached_cap", "cap": 3},
+        ]
+
+    @pytest.mark.parametrize("trims", [1, 2, 3])
     async def test_stored_events_do_not_resume_after_a_later_copy_of_their_last_event(
         self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch, trims: int
     ) -> None:
-        """The first page ends at X; X's retry copy sits two after it. Head trims before the next page
-        shift the real X out of it, and resuming after the copy would skip Y. (Exactly two trims
-        put the copy at X's own index, where no read can tell them apart: a known gap.)"""
+        """Head trims can place a retry copy at the exact index where the first page ended."""
         page = redis_broker._REPLAY_PAGE_EVENTS
-        await _write(_broker(), range(page))
+        await _legacy_write(client, range(page))
         last_of_first_page = await client.lindex(CACHE_KEY, page - 1)
-        await _write(_broker(), range(page, page + 1))
+        await _legacy_write(client, range(page, page + 1))
         await client.rpush(CACHE_KEY, last_of_first_page)
-        await _write(_broker(), range(page + 1, page + 3), end=True)
+        await _legacy_write(client, range(page + 1, page + 3), end=True)
+
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", await client.llen(CACHE_KEY))
 
         async def trim_before_the_second_page(call: int, start: int, end: int) -> None:
             for _ in range(trims if call == 2 else 0):
-                await client.lpop(CACHE_KEY)
-                await client.rpush(CACHE_KEY, json.dumps({"event_id": f"pad-{call}", "payload": ["messages", {}]}))
+                await _broker().put(f"pad-{call}", ("messages", {}))
 
-        _wrap_lrange(client, monkeypatch, before=trim_before_the_second_page)
+        _wrap_read(client, monkeypatch, before=trim_before_the_second_page)
 
         sent = [event_id async for event_id, _ in _broker().events(follow=False)]
 
@@ -205,12 +257,13 @@ class TestStoredEvents:
         """Each later page sees 0-6 head trims first, which is what LTRIM at the cap does on every append."""
         await _write(_broker(), range(3 * redis_broker._REPLAY_PAGE_EVENTS), end=True)
 
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", await client.llen(CACHE_KEY))
+
         async def trim(call: int, start: int, end: int) -> None:
             for _ in range(call % 7 if start > 0 else 0):
-                await client.lpop(CACHE_KEY)
-                await client.rpush(CACHE_KEY, json.dumps({"event_id": f"pad-{call}", "payload": ["messages", {}]}))
+                await _broker().put(f"pad-{call}", ("messages", {}))
 
-        _wrap_lrange(client, monkeypatch, before=trim)
+        _wrap_read(client, monkeypatch, before=trim)
 
         sent = [event_id async for event_id, _ in _broker().events(follow=False)]
 
@@ -226,7 +279,7 @@ class TestStoredEvents:
             if start > 0:
                 raise RedisError("connection reset")
 
-        _wrap_lrange(client, monkeypatch, before=fail_after_the_first_page)
+        _wrap_read(client, monkeypatch, before=fail_after_the_first_page)
         sent: list[str] = []
 
         with pytest.raises(ReplayGapError) as gap:
@@ -273,11 +326,10 @@ class TestStoredEvents:
         monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 8)
         monkeypatch.setattr(redis_broker, "_REPLAY_PAGE_EVENTS", 3)
         monkeypatch.setattr(client, "lpos", _rejected_lpos)
-        writer = _broker()
-        await _write(writer, range(8))
+        await _legacy_write(client, range(8))
         events = _broker().events(follow=False)
         await anext(events)
-        await _write(writer, range(8, 12))
+        await _legacy_write(client, range(8, 12))
 
         with pytest.raises(ReplayGapError, match="LPOS"):
             async for _ in events:
@@ -351,7 +403,7 @@ class TestFollowEvents:
                 wrote = True
                 await writer.put(END_ID, ("end", {"status": "success"}))
 
-        _wrap_lrange(client, monkeypatch, after=end_after_the_tail_read)
+        _wrap_read(client, monkeypatch, after=end_after_the_tail_read)
         monkeypatch.setattr(redis_broker, "_LIVE_RECHECK_SECONDS", 60.0)
 
         # Far under the recheck: only the read right after subscribing can find it.
@@ -367,7 +419,7 @@ class TestFollowEvents:
             if call == 2:  # the read right after subscribing: stored and published
                 await _write(writer, range(5, 6), end=True)
 
-        _wrap_lrange(client, monkeypatch, before=write_before_the_second_read)
+        _wrap_read(client, monkeypatch, before=write_before_the_second_read)
 
         assert await asyncio.wait_for(_collect(_broker().events(follow=True)), 2) == _ids(6, end=True)
 
@@ -485,6 +537,45 @@ class TestFollowEvents:
 
         assert received == _ids(4, end=True)
 
+    @pytest.mark.parametrize("cap", [4, 10_000])
+    async def test_caught_up_follower_receives_one_payload_from_redis_per_event(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch, cap: int
+    ) -> None:
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", cap)
+        written = 0
+        page_bytes = 0
+        published_bytes = 0
+        get_message = PubSub.get_message
+
+        async def record_page(page: list[str], start: int, end: int) -> None:
+            nonlocal page_bytes
+            page_bytes += sum(len(raw.encode()) for raw in page)
+
+        async def record_message(self: PubSub, *args: Any, **kwargs: Any) -> Any:
+            nonlocal published_bytes
+            message = await get_message(self, *args, **kwargs)
+            if message and message["type"] == "message":
+                published_bytes += len(message["data"].encode())
+            return message
+
+        _wrap_read(client, monkeypatch, after=record_page)
+        monkeypatch.setattr(PubSub, "get_message", record_message)
+        writer = _broker()
+        await writer.put("seed", ("messages", 0))
+        events = _broker().events(follow=True)
+        async with aclosing(events):
+            assert await anext(events) == ("seed", ("messages", 0))
+            page_bytes = 0
+            for i in range(20):
+                received = asyncio.ensure_future(anext(events))
+                await _until(lambda: _subscribed(client))
+                value = ("messages", "x" * 4096) if i < 19 else ("end", {})
+                await writer.put("shared", value)
+                written += len((await client.lindex(CACHE_KEY, -1)).encode())
+                assert await asyncio.wait_for(received, 1) == ("shared", value)
+            assert await anext(events, None) is None
+        assert written <= page_bytes + published_bytes < written * 1.05
+
     async def test_follow_ends_when_another_process_failed_to_publish_end(
         self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -504,11 +595,22 @@ class TestFollowEvents:
         self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Parity with aiter: a locally finished broker with no stored `end` still ends its followers."""
-        monkeypatch.setattr(redis_broker, "_LIVE_RECHECK_SECONDS", 0.1)
+        monkeypatch.setattr(redis_broker, "_LIVE_RECHECK_SECONDS", 60.0)
+        blocked = asyncio.Event()
+        get_message = PubSub.get_message
+
+        async def on_wait(self: PubSub, *args: Any, **kwargs: Any) -> Any:
+            result = await get_message(self, timeout=0)
+            if result is not None:
+                return result
+            blocked.set()
+            return await get_message(self, *args, **kwargs)
+
+        monkeypatch.setattr(PubSub, "get_message", on_wait)
         broker = _broker()
         await _write(broker, range(2))
         consumer = asyncio.create_task(_collect(broker.events(follow=True)))
-        await _until(lambda: _subscribed(client))
+        await asyncio.wait_for(blocked.wait(), 1)
         await client.rpush(CACHE_KEY, json.dumps({"event_id": _event_id(2), "payload": list(_event(2))}))
 
         broker.mark_finished()
@@ -595,11 +697,10 @@ class TestFollowEvents:
         monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 8)
         monkeypatch.setattr(redis_broker, "_REPLAY_PAGE_EVENTS", 3)
         monkeypatch.setattr(client, "lpos", _rejected_lpos)
-        writer = _broker()
-        await _write(writer, range(8))
+        await _legacy_write(client, range(8))
         events = _broker().events(follow=True)
         await anext(events)
-        await _write(writer, range(8, 12))
+        await _legacy_write(client, range(8, 12))
 
         with pytest.raises(ReplayGapError, match="LPOS"):
             await asyncio.wait_for(_collect(events), 2)
@@ -633,6 +734,45 @@ class TestFollowEvents:
 
         assert received == _ids(30, end=True)
         assert len(lpos_calls) <= 1, lpos_calls
+
+    async def test_recreated_list_backfills_even_when_the_publication_has_the_expected_ordinal(
+        self, client: fakeredis.FakeAsyncRedis
+    ) -> None:
+        writer = _broker()
+        await writer.put("old", ("messages", 0))
+        events = _broker().events(follow=True)
+        async with aclosing(events):
+            assert await anext(events) == ("old", ("messages", 0))
+            reading = asyncio.ensure_future(anext(events))
+            await _until(lambda: _subscribed(client))
+            await client.delete(CACHE_KEY, writer._counter_key)
+            lost_publish = json.dumps({"event_id": "first", "delivery_id": "a", "payload": ["messages", 1]})
+            await writer._cache_event(lost_publish)
+            await writer.put("second", ("messages", 2))
+            await writer.put(END_ID, ("end", {}))
+            assert await asyncio.wait_for(reading, 1) == ("first", ("messages", 1))
+            assert [event_id async for event_id, _ in events] == ["second", END_ID]
+
+    async def test_old_and_new_writers_can_alternate_across_a_cap(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 8)
+        writer = _broker()
+        await _write(writer, range(8))
+        events = _broker().events(follow=True)
+        async with aclosing(events):
+            for i in range(8):
+                assert await anext(events) == (_event_id(i), _event(i))
+            for i in range(8, 20, 3):
+                reading = asyncio.ensure_future(anext(events))
+                await _until(lambda: _subscribed(client))
+                await _legacy_write(client, range(i, i + 2))
+                await _write(writer, range(i + 2, i + 3))
+                assert await asyncio.wait_for(reading, 1) == (_event_id(i), _event(i))
+                for j in (i + 1, i + 2):
+                    assert await anext(events) == (_event_id(j), _event(j))
+            await writer.put(END_ID, ("end", {}))
+            assert [event_id async for event_id, _ in events] == [END_ID]
 
     async def test_follow_survives_a_subscription_that_fails_to_close(
         self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch

@@ -10,13 +10,15 @@ access (instead of deriving from the replay buffer with O(N) LRANGE).
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import random
 import time
-from collections import deque
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 import structlog
 from redis import RedisError
@@ -60,10 +62,6 @@ _PUT_MAX_ATTEMPTS = 3
 
 # Stored events read per LRANGE: what a reader holds follows this, not the run's length.
 _REPLAY_PAGE_EVENTS = 16
-# Recently delivered ids a reader remembers, so a retry copy of an event is not sent twice.
-_DELIVERED_EVENT_IDS = 128
-# Elements re-read before the place LPOS found, in case the cap trims again before the read.
-_REALIGN_SLACK = 4
 # A follower re-reads the buffer this often without a pub/sub wake-up (a PUBLISH can fail).
 _LIVE_RECHECK_SECONDS = 5.0
 
@@ -85,22 +83,102 @@ def _deserialize_payload(raw: Any) -> Any:
     return raw
 
 
+_TAIL_POSITION = """
+local tail = redis.call('LINDEX', KEYS[1], -1)
+local epoch, ordinal = string.match(tail or '', '^{"position":"(%x+):(%d+)",')
+"""
+
+_APPEND = (
+    _TAIL_POSITION
+    + """
+local message, new_epoch, cap, ttl = unpack(ARGV)
+local position = (epoch or new_epoch) .. ':' .. ((ordinal or 0) + 1)
+local length = redis.call('RPUSH', KEYS[1], '{"position":"' .. position .. '",' .. string.sub(message, 2))
+redis.call('LTRIM', KEYS[1], -tonumber(cap), -1)
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], ttl)
+return {length, position}
+"""
+)
+
+# Older writers increment the counter for every cache append and separately for ID allocation.
+# On an unpositioned page this bounds how far the head could have moved.
+_READ_PAGE = (
+    _TAIL_POSITION
+    + """
+local length = redis.call('LLEN', KEYS[1])
+local counter = tonumber(redis.call('GET', KEYS[2]) or '0')
+local index, old_length, old_counter, cap, page, previous_epoch, previous_ordinal, anchor = unpack(ARGV)
+local first
+if epoch and epoch == previous_epoch then
+    first = length - (ordinal - previous_ordinal)
+elseif previous_epoch ~= '' then
+    if anchor == '' then return {-2, length, counter, {}} end
+    local at = redis.call('LPOS', KEYS[1], anchor)
+    first = at and at + 1 or -1
+else
+    local trims = length < tonumber(cap) and 0 or math.max(0, old_length + counter - old_counter - cap)
+    first = math.max(0, index - trims)
+    if trims == 0 and anchor ~= '' and redis.call('LINDEX', KEYS[1], index - 1) ~= anchor then
+        first = -1
+    end
+end
+if first < 0 or first > length then return {-1, length, counter, {}} end
+return {first, length, counter, redis.call('LRANGE', KEYS[1], first, first + page - 1)}
+"""
+)
+
+
 @dataclass
 class _ReplayPlace:
-    """One reader's place in a run's replay buffer; each ``events`` call owns its own.
-
-    ``anchor`` is the raw element consumed last and ``index`` the list index just past it as
-    of the last read. LTRIM at the cap shifts both left, so a read finds ``anchor`` before
-    trusting ``index``. Event ids are never positions: they step by two and writers interleave.
-    Once the cap has trimmed under this reader, every read also covers ``slack`` elements before
-    the anchor's expected index, so a follower at the cap finds it without an LPOS per wake-up.
-    """
-
+    thread_run_id: str | None = None
     index: int = 0
-    anchor: str | None = None
-    slack: int = 0
-    delivered: deque[str] = field(default_factory=lambda: deque(maxlen=_DELIVERED_EVENT_IDS))
+    length: int = 0
+    counter: int = 0
+    anchor: str = ""
+    epoch: str = ""
+    ordinal: int = 0
+    epochs: OrderedDict[str, int] = field(default_factory=OrderedDict)
+    recent: OrderedDict[str, None] = field(default_factory=OrderedDict)
+    legacy: OrderedDict[bytes, None] = field(default_factory=OrderedDict)
     ended: bool = False
+
+    def consume(self, raw: str, data: dict[str, Any]) -> tuple[str, Any] | None:
+        self.anchor = raw
+        self.index += 1
+        position = data.get("position")
+        if position:
+            self.epoch, n = position.split(":")
+            self.ordinal = int(n)
+            if self.ordinal <= self.epochs.get(self.epoch, 0):
+                return None
+            self.epochs[self.epoch] = self.ordinal
+            if len(self.epochs) > _REPLAY_MAX_EVENTS:
+                self.epochs.popitem(last=False)
+            delivery = data["delivery_id"]
+            if delivery in self.recent:
+                self.recent.move_to_end(delivery)
+                return None
+            self.recent[delivery] = None
+            if len(self.recent) > 128:
+                self.recent.popitem(last=False)
+        else:
+            self.epoch, self.ordinal = "", 0
+            digest = hashlib.sha256(raw.encode()).digest()
+            if digest in self.legacy:
+                self.legacy.move_to_end(digest)
+                return None
+            self.legacy[digest] = None
+            if len(self.legacy) > _REPLAY_MAX_EVENTS:
+                self.legacy.popitem(last=False)
+        payload = _deserialize_payload(data["payload"])
+        self.ended = _is_terminal_payload(payload)
+        event_id = data["event_id"]
+        if self.thread_run_id is not None:
+            suffix = delivery if position else digest.hex()
+            event_id = f"{self.thread_run_id}:delivery:{suffix}"
+        return event_id, payload
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -122,7 +200,9 @@ class RedisRunBroker(BaseRunBroker):
         self._channel = channel
         self._cache_key = cache_key
         self._counter_key = counter_key
-        self._finished = False
+        self._finished = asyncio.Event()
+        self._observed_buffer = False
+        self._observed_cap = False
         # Serializes writes for this run so concurrent put() calls (e.g. a
         # cancel/error signal racing a stream write) keep cache-then-publish
         # ordering — without it, a backoff sleep on one put could let a later
@@ -134,20 +214,19 @@ class RedisRunBroker(BaseRunBroker):
 
         Writes are retried with bounded backoff (see ``_write_with_retry``), so
         delivery is **at-least-once**: in the rare case a write times out *after*
-        Redis already applied it, a retry may re-deliver the event. ``event_id``
-        is stable (allocated once upstream), so consumers de-duplicate on
-        ``Last-Event-ID`` during replay.
+        Redis already applied it, a retry may re-deliver the event. Retry copies
+        share one delivery ID. Each physical append has its own position.
         """
-        if self._finished:
+        if self._finished.is_set():
             logger.warning(f"Attempted to put event {event_id} into finished broker for run {self.run_id}")
             return
 
-        message = json.dumps(
-            {
-                "event_id": event_id,
-                "payload": json.loads(_serialize_payload(payload)),
-            }
-        )
+        envelope = {
+            "event_id": event_id,
+            "delivery_id": uuid4().hex,
+            "payload": json.loads(_serialize_payload(payload)),
+        }
+        message = json.dumps(envelope)
 
         is_end = isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end"
 
@@ -158,13 +237,24 @@ class RedisRunBroker(BaseRunBroker):
             operation = "cache"
             try:
                 if resumable:
-                    await self._write_with_retry(self._cache_event, message)
+                    length, position = await self._write_with_retry(self._cache_event, message)
+                    if not self._observed_buffer:
+                        logger.info(
+                            "run_replay_buffer", run_id=self.run_id, milestone="started", cap=_REPLAY_MAX_EVENTS
+                        )
+                        self._observed_buffer = True
+                    if length >= _REPLAY_MAX_EVENTS and not self._observed_cap:
+                        logger.info(
+                            "run_replay_buffer", run_id=self.run_id, milestone="reached_cap", cap=_REPLAY_MAX_EVENTS
+                        )
+                        self._observed_cap = True
+                    message = '{"position":"' + position + '",' + message[1:]
 
                 operation = "publish"
                 await self._write_with_retry(self._publish_event, message)
 
                 if is_end:
-                    self._finished = True
+                    self._finished.set()
             except RedisError as e:
                 logger.error(
                     f"Redis {operation} write failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {e}"
@@ -172,25 +262,22 @@ class RedisRunBroker(BaseRunBroker):
                 # Even if Redis fails, mark finished for end events so aiter() can exit
                 # rather than looping forever waiting for an end event that won't arrive.
                 if is_end:
-                    self._finished = True
+                    self._finished.set()
 
-    async def _cache_event(self, message: str) -> None:
-        """Append the event to the replay buffer and bump the sequence counter."""
-        client = redis_manager.get_client()
-        pipe = client.pipeline()
-        pipe.rpush(self._cache_key, message)
-        pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
-        pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
-        pipe.incr(self._counter_key)
-        pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
-        await pipe.execute()
+    async def _cache_event(self, message: str) -> tuple[int, str]:
+        append = redis_manager.get_client().register_script(_APPEND)
+        length, position = await append(
+            keys=[self._cache_key, self._counter_key],
+            args=[message, uuid4().hex, _REPLAY_MAX_EVENTS, _REPLAY_TTL_SECONDS],
+        )
+        return length, position
 
     async def _publish_event(self, message: str) -> None:
         """Broadcast the event to live subscribers."""
         client = redis_manager.get_client()
         await client.publish(self._channel, message)
 
-    async def _write_with_retry(self, op: Callable[[str], Awaitable[None]], message: str) -> None:
+    async def _write_with_retry[T](self, op: Callable[[str], Awaitable[T]], message: str) -> T:
         """Run a Redis write with bounded exponential backoff.
 
         Mirrors the retry/backoff the read path (aiter) already applies, so a
@@ -201,8 +288,7 @@ class RedisRunBroker(BaseRunBroker):
         attempt = 0
         while True:
             try:
-                await op(message)
-                return
+                return await op(message)
             except RedisError as e:
                 attempt += 1
                 if attempt >= _PUT_MAX_ATTEMPTS:
@@ -216,7 +302,7 @@ class RedisRunBroker(BaseRunBroker):
 
     async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
         attempt = 0
-        while not self._finished:
+        while not self._finished.is_set():
             try:
                 async for event_id, payload in self._subscribe_and_listen():
                     attempt = 0
@@ -242,7 +328,7 @@ class RedisRunBroker(BaseRunBroker):
         # the end event was published before we subscribed on this instance).
         end_already_in_buffer = await self._check_end_in_buffer()
 
-        last_yielded_event_id: str | None = None
+        last_delivery: str | None = None
         try:
             while True:
                 message = await pubsub.get_message(
@@ -250,7 +336,7 @@ class RedisRunBroker(BaseRunBroker):
                     timeout=0.5,
                 )
                 if message is None:
-                    if self._finished or end_already_in_buffer:
+                    if self._finished.is_set() or end_already_in_buffer:
                         break
                     continue
 
@@ -260,20 +346,17 @@ class RedisRunBroker(BaseRunBroker):
                 data = json.loads(message["data"])
                 event_id: str = data["event_id"]
 
-                # Drop an at-least-once republish (put() retries a transient
-                # publish failure). event_ids are unique per event and the write
-                # lock keeps a retry adjacent, so skipping a repeat of the last
-                # id de-duplicates without dropping a distinct event.
-                if event_id == last_yielded_event_id:
+                delivery = data.get("delivery_id") or message["data"]
+                if delivery == last_delivery:
                     continue
-                last_yielded_event_id = event_id
+                last_delivery = delivery
 
                 payload = _deserialize_payload(data["payload"])
 
                 yield event_id, payload
 
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
-                    self._finished = True
+                    self._finished.set()
                     break
         finally:
             await pubsub.unsubscribe(self._channel)
@@ -292,7 +375,7 @@ class RedisRunBroker(BaseRunBroker):
                 data = json.loads(raw_messages[0])
                 payload = _deserialize_payload(data["payload"])
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
-                    self._finished = True
+                    self._finished.set()
                     return True
         except RedisError as e:
             logger.warning(f"Failed checking replay buffer for end event for run {self.run_id}: {e}")
@@ -312,19 +395,15 @@ class RedisRunBroker(BaseRunBroker):
         all_events: list[tuple[str, Any]] = []
         events_after: list[tuple[str, Any]] = []
         found_last = last_event_id is None
-        prev_event_id: str | None = None
+        previous_delivery: str | None = None
         for raw in raw_messages:
             data = json.loads(raw)
             event_id: str = data["event_id"]
 
-            # Skip an adjacent duplicate: put() retries are at-least-once, so a
-            # write that timed out *after* Redis applied it can RPUSH the same
-            # event twice. The per-run write lock keeps the copies adjacent, and
-            # event_ids are unique per event, so dropping a run of equal ids is
-            # safe and removes the duplicate from replay.
-            if event_id == prev_event_id:
+            delivery = data.get("delivery_id") or raw
+            if delivery == previous_delivery:
                 continue
-            prev_event_id = event_id
+            previous_delivery = delivery
 
             payload = _deserialize_payload(data["payload"])
             all_events.append((event_id, payload))
@@ -342,16 +421,14 @@ class RedisRunBroker(BaseRunBroker):
 
         return events_after
 
-    async def events(self, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
-        """Read the replay buffer a page at a time and, with ``follow``, as the run appends to it.
+    def events(self, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
+        return self._events(_ReplayPlace(), follow=follow)
 
-        The list is the only source of events, so a ``resumable=False`` event is not delivered.
-        Pub/sub only wakes a follower, which also re-reads every ``_LIVE_RECHECK_SECONDS``, so
-        nothing written between the stored and the live events is lost, not even an event whose
-        PUBLISH failed. A RedisError ends a ``follow=False`` read as ``ReplayGapError``; a
-        follower backs off, resubscribes and goes on from its place.
-        """
-        place = _ReplayPlace()
+    def thread_events(self, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
+        return self._events(_ReplayPlace(thread_run_id=self.run_id), follow=follow)
+
+    async def _events(self, place: _ReplayPlace, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
+        """Page stored events and follow indexed live publications, backfilling gaps from the list."""
         if not follow:
             try:
                 async for event in self._stored(place, follow=False):
@@ -362,10 +439,11 @@ class RedisRunBroker(BaseRunBroker):
 
         pubsub: PubSub | None = None
         attempt = 0
+        finished_wait = asyncio.create_task(self._finished.wait())
         try:
             while True:
                 # Taken before the read, so a finish that lands during it still gets one more read.
-                finished = self._finished
+                finished = self._finished.is_set()
                 try:
                     async for event in self._stored(place, follow=True):
                         attempt = 0
@@ -377,10 +455,43 @@ class RedisRunBroker(BaseRunBroker):
                         pubsub = redis_manager.get_client().pubsub()
                         await pubsub.subscribe(self._channel)
                         continue
-                    await pubsub.get_message(timeout=_LIVE_RECHECK_SECONDS)
-                    while await pubsub.get_message(timeout=0) is not None:
-                        pass
+                    while not self._finished.is_set():
+                        pending = asyncio.create_task(pubsub.get_message(timeout=_LIVE_RECHECK_SECONDS))
+                        try:
+                            await asyncio.wait((pending, finished_wait), return_when=asyncio.FIRST_COMPLETED)
+                        finally:
+                            if not pending.done():
+                                pending.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await pending
+                        if pending.cancelled():
+                            break
+                        message = pending.result()
+                        if message is None:
+                            break
+                        if message["type"] != "message":
+                            continue
+                        data = json.loads(message["data"])
+                        position = data.get("position")
+                        if not place.epoch or position != f"{place.epoch}:{place.ordinal + 1}":
+                            if position:
+                                epoch, n = position.split(":")
+                                if int(n) <= place.epochs.get(epoch, 0):
+                                    continue
+                            break
+                        place.length = min(place.length + 1, _REPLAY_MAX_EVENTS)
+                        place.index = place.length - 1
+                        place.counter += 1
+                        event = place.consume(message["data"], data)
+                        if event is not None:
+                            if place.ended and event[1][0] == "end":
+                                self._finished.set()
+                            yield event
+                            if place.ended:
+                                return
                 except RedisError as e:
+                    if finished:
+                        raise ReplayGapError(f"Final replay of run {self.run_id} failed: {e}") from e
                     attempt += 1
                     delay = _backoff_delay(attempt)
                     logger.warning(
@@ -391,69 +502,75 @@ class RedisRunBroker(BaseRunBroker):
                         with contextlib.suppress(RedisError):
                             await pubsub.aclose()
                         pubsub = None
-                    await asyncio.sleep(delay)
+                    await asyncio.wait((finished_wait,), timeout=delay)
         finally:
+            finished_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await finished_wait
             if pubsub is not None:
                 with contextlib.suppress(RedisError):
                     await pubsub.aclose()
 
-    async def _stored(self, place: _ReplayPlace, *, follow: bool) -> AsyncIterator[tuple[str, Any]]:
-        """Yield the stored events after ``place`` up to the buffer's tail, one page in memory.
-
-        A lost place (anchor trimmed away, or the buffer expired) raises ``ReplayGapError``, or
-        with ``follow`` restarts at the head: everything still stored is newer than the anchor.
-        A server that rejects LPOS (Redis < 6.0.6) cannot find the place, so it raises either way.
-        """
+    async def _read_page(self, place: _ReplayPlace) -> tuple[int, int, int, list[str]]:
         client = redis_manager.get_client()
+        read = client.register_script(_READ_PAGE)
+        args = [
+            place.index,
+            place.length,
+            place.counter,
+            _REPLAY_MAX_EVENTS,
+            _REPLAY_PAGE_EVENTS,
+            place.epoch,
+            place.ordinal,
+        ]
+        keys = [self._cache_key, self._counter_key]
+        legacy_anchor = "" if place.epoch else place.anchor
+        first, length, counter, raws = await read(keys=keys, args=[*args, legacy_anchor])
+        if first == -2:
+            try:
+                first, length, counter, raws = await read(keys=keys, args=[*args, place.anchor])
+            except ResponseError as e:
+                raise ReplayGapError(f"Redis cannot check run {self.run_id}'s place with LPOS: {e}") from e
+        return first, length, counter, raws
+
+    async def _stored(self, place: _ReplayPlace, *, follow: bool) -> AsyncIterator[tuple[str, Any]]:
         while True:
-            first = max(place.index - 1 - place.slack, 0) if place.anchor is not None else place.index
-            last = place.index + _REPLAY_PAGE_EVENTS - 1
-            raws = await client.lrange(self._cache_key, first, last)  # type: ignore[invalid-await]
-            skip = 0
-            if place.anchor is not None:
-                # LTRIM only moves the anchor left, so a match past its last index is a later retry copy.
-                at = next((i for i, raw in enumerate(raws[: place.index - first]) if raw == place.anchor), None)
-                if at is None:
-                    try:
-                        found = await client.lpos(self._cache_key, place.anchor)  # type: ignore[invalid-await]
-                    except ResponseError as e:
-                        raise ReplayGapError(
-                            f"Redis cannot find run {self.run_id}'s place (LPOS needs Redis >= 6.0.6): {e}"
-                        ) from e
-                    if found is not None:
-                        place.index, place.slack = found + 1, _REALIGN_SLACK
-                        continue
-                    how = "trimmed past the reader" if raws else "expired"
-                    if not follow:
-                        raise ReplayGapError(f"Replay of run {self.run_id} lost its place: buffer {how}")
-                    logger.warning(f"Replay of run {self.run_id} lost its place (buffer {how}), resuming at its head")
-                    place.index, place.anchor = 0, None
-                    continue
-                skip = at + 1
-            for index, raw in enumerate(raws[skip:], start=first + skip + 1):
-                place.anchor, place.index = raw, index
-                data = json.loads(raw)
-                event_id: str = data["event_id"]
-                if event_id in place.delivered:
-                    continue
-                place.delivered.append(event_id)
-                payload = _deserialize_payload(data["payload"])
-                if _is_terminal_payload(payload):
-                    place.ended = True
-                    # Parity with aiter, which marks the broker finished at its end event.
-                    self._finished = self._finished or payload[0] == "end"
-                yield event_id, payload
-                if place.ended:
-                    return
-            if len(raws) < last - first + 1:
+            first, length, counter, raws = await self._read_page(place)
+            expired = length < place.length or counter < place.counter
+            lost = first < 0 or expired
+            if not lost and not place.epoch and first == 0 and place.index > 0 and place.anchor:
+                client = redis_manager.get_client()
+                try:
+                    found = await client.lpos(self._cache_key, place.anchor)  # type: ignore[invalid-await]
+                except ResponseError as e:
+                    raise ReplayGapError(f"Redis cannot check run {self.run_id}'s place with LPOS: {e}") from e
+                lost = found is None
+            if lost:
+                how = "expired" if expired else "trimmed past the reader"
+                if not follow:
+                    raise ReplayGapError(f"Replay of run {self.run_id} lost its place: buffer {how}")
+                logger.warning(f"Replay of run {self.run_id} lost its place (buffer {how}), resuming at its head")
+                place.index = place.length = place.counter = place.ordinal = 0
+                place.anchor = place.epoch = ""
+                continue
+            place.index, place.length, place.counter = first, length, counter
+            for raw in raws:
+                event = place.consume(raw, json.loads(raw))
+                if event is not None:
+                    if place.ended and event[1][0] == "end":
+                        self._finished.set()
+                    yield event
+                    if place.ended:
+                        return
+            if place.index >= length:
                 return
 
     def mark_finished(self) -> None:
-        self._finished = True
+        self._finished.set()
         logger.debug(f"Redis broker for run {self.run_id} marked as finished")
 
     def is_finished(self) -> bool:
-        return self._finished
+        return self._finished.is_set()
 
 
 class RedisBrokerManager(BaseBrokerManager):

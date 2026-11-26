@@ -7,7 +7,6 @@ to the existing run preparation pipeline.
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
-from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
@@ -31,6 +30,7 @@ from aegra_api.services.langgraph_service import LangGraphService, get_langgraph
 from aegra_api.services.webhook_policy import ensure_webhook_allowed
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
+from aegra_api.utils.ids import new_id
 
 logger = structlog.getLogger(__name__)
 
@@ -281,7 +281,7 @@ class CronService:
         )
 
         cron_orm = CronORM(
-            cron_id=str(uuid4()),
+            cron_id=new_id(),
             assistant_id=resolved_assistant_id,
             thread_id=thread_id,
             user_id=user_identity,

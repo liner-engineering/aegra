@@ -59,7 +59,7 @@ known-first-party = ["aegra_api", "aegra_cli"]
 # mypy-style strictness flags. Severity and per-rule overrides go in
 # [tool.ty.rules]; see https://docs.astral.sh/ty/reference/rules/ for details.
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.14"
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]

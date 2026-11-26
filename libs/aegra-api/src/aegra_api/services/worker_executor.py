@@ -47,7 +47,7 @@ _RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 
 
 def _is_valid_run_id(value: str) -> bool:
-    """Check if a string is a valid UUID v4 hex format."""
+    """Check if a string is a lowercase hex UUID string (any version)."""
     return bool(_RUN_ID_PATTERN.match(value))
 
 

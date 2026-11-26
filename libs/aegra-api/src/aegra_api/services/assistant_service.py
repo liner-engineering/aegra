@@ -17,7 +17,6 @@ applied to other APIs (runs, threads, crons) as part of ongoing refactoring.
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
 
 from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
@@ -35,6 +34,7 @@ from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
+from aegra_api.utils.ids import new_id
 
 
 def to_pydantic(row: AssistantORM) -> Assistant:
@@ -196,7 +196,7 @@ class AssistantService(Authenticated):
             config["configurable"] = context
 
         # Generate assistant_id if not provided
-        assistant_id = request.assistant_id or str(uuid4())
+        assistant_id = request.assistant_id or new_id()
 
         # Generate name if not provided
         name = request.name or f"Assistant for {graph_id}"

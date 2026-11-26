@@ -8,7 +8,6 @@ import asyncio
 from datetime import UTC, datetime
 from functools import cache
 from typing import Any
-from uuid import uuid4
 
 import structlog
 from asgi_correlation_id import correlation_id
@@ -32,6 +31,7 @@ from aegra_api.services.run_status import set_thread_status
 from aegra_api.services.webhook_policy import ensure_webhook_allowed
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
+from aegra_api.utils.ids import new_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
 
@@ -295,7 +295,7 @@ async def _prepare_run(
         await ensure_webhook_allowed(request.webhook)
     await _validate_resume_command(session, thread_id, request.command)
 
-    run_id = str(uuid4())
+    run_id = new_id()
     langgraph_service = get_langgraph_service()
     logger.info(
         "Scheduling run",

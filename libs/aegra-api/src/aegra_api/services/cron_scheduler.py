@@ -15,7 +15,6 @@ Follows the same ``start()/stop()`` lifecycle pattern used by
 import asyncio
 import contextlib
 from datetime import UTC, datetime
-from uuid import uuid4
 
 import structlog
 from fastapi import HTTPException
@@ -32,6 +31,7 @@ from aegra_api.services.cron_service import (
 from aegra_api.services.run_cleanup import delete_thread_by_id, schedule_background_cleanup
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.settings import settings
+from aegra_api.utils.ids import new_id
 
 logger = structlog.getLogger(__name__)
 
@@ -188,7 +188,7 @@ class CronScheduler:
             return
 
         run_request = _build_run_create(cron)
-        thread_id = cron.thread_id or str(uuid4())
+        thread_id = cron.thread_id or new_id()
         user = User(
             identity=cron.user_id,
             display_name="cron-scheduler",

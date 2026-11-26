@@ -6,7 +6,6 @@ import json
 import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -46,6 +45,7 @@ from aegra_api.services.run_status import interrupt_run_before_delete
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user, prune_threads_by_id
+from aegra_api.utils.ids import new_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import strip_pinned_config_keys
 
@@ -234,7 +234,7 @@ async def create_thread(
         if isinstance(handler_meta, dict):
             request.metadata = {**(request.metadata or {}), **handler_meta}
 
-    thread_id = request.thread_id or str(uuid4())
+    thread_id = request.thread_id or new_id()
     # Resolve before the insert so an invalid ttl request 422s without DB work.
     ttl_row = _resolve_ttl_row(thread_id, request.ttl)
 

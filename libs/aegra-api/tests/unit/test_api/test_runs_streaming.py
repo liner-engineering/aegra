@@ -78,7 +78,7 @@ class TestRunsStreamingEndpoints:
             ),
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.services.run_preparation.new_id", return_value=run_id),
             patch(
                 "aegra_api.services.run_preparation.executor.submit",
                 new_callable=AsyncMock,
@@ -160,7 +160,7 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.services.run_preparation.new_id", return_value=run_id),
             patch(
                 "aegra_api.services.run_preparation.executor.submit",
                 new_callable=AsyncMock,
@@ -214,7 +214,7 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.services.run_preparation.new_id", return_value=run_id),
             patch(
                 "aegra_api.services.run_preparation.executor.submit",
                 new_callable=AsyncMock,

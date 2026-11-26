@@ -8,7 +8,6 @@ explicitly sets ``on_completion="keep"``).
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
-from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -33,6 +32,7 @@ from aegra_api.services.run_cleanup import (
     delete_thread_by_id,
     schedule_background_cleanup,
 )
+from aegra_api.utils.ids import new_id
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -134,7 +134,7 @@ async def stateless_wait_for_run(
     endpoint, and deletes the thread after the response finishes streaming
     (unless ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = new_id()
     should_delete = request.on_completion != "keep"
 
     try:
@@ -202,7 +202,7 @@ async def stateless_stream_run(
     ``create_and_stream_run`` endpoint, and deletes the thread after the
     stream finishes (unless ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = new_id()
     should_delete = request.on_completion != "keep"
 
     try:
@@ -284,7 +284,7 @@ async def stateless_create_run(
     endpoint, and schedules cleanup as a background task (unless
     ``on_completion="keep"``).
     """
-    thread_id = str(uuid4())
+    thread_id = new_id()
     should_delete = request.on_completion != "keep"
 
     try:
